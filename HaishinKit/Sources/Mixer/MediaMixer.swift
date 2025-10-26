@@ -64,9 +64,7 @@ public final actor MediaMixer {
     }
 
     /// The feature to mix multiple audio tracks. For example, it is possible to mix .appAudio and .micAudio from ReplayKit.
-    public var isMultiTrackAudioMixingEnabled: Bool {
-        audioIO.isMultiTrackAudioMixingEnabled
-    }
+    public let isMultiTrackAudioMixingEnabled: Bool
 
     /// The sessionPreset for the AVCaptureSession.
     @available(tvOS 17.0, *)
@@ -125,7 +123,7 @@ public final actor MediaMixer {
     private var outputs: [any MediaMixerOutput] = []
     @MainActor
     private var cancellables: Set<AnyCancellable> = []
-    private lazy var audioIO = AudioCaptureUnit(session)
+    private lazy var audioIO = AudioCaptureUnit(session, isMultiTrackAudioMixingEnabled: isMultiTrackAudioMixingEnabled)
     private lazy var videoIO = VideoCaptureUnit(session)
     private lazy var session: (any CaptureSessionConvertible) = captureSessionMode.makeSession()
     @ScreenActor
@@ -141,15 +139,7 @@ public final actor MediaMixer {
         multiTrackAudioMixingEnabled: Bool = false
     ) {
         self.captureSessionMode = captureSessionMode
-        Task {
-            await _init(multiTrackAudioMixingEnabled: multiTrackAudioMixingEnabled)
-        }
-    }
-
-    private func _init(
-        multiTrackAudioMixingEnabled: Bool
-    ) async {
-        audioIO.isMultiTrackAudioMixingEnabled = multiTrackAudioMixingEnabled
+        self.isMultiTrackAudioMixingEnabled = multiTrackAudioMixingEnabled
     }
 
     /// Attaches a video device.

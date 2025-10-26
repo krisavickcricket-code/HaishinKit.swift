@@ -54,8 +54,9 @@ final class AudioCaptureUnit: CaptureUnit {
     private let session: (any CaptureSessionConvertible)
     private var continutation: AsyncStream<(AVAudioPCMBuffer, AVAudioTime)>.Continuation?
 
-    init(_ session: (some CaptureSessionConvertible)) {
+    init(_ session: (some CaptureSessionConvertible), isMultiTrackAudioMixingEnabled: Bool) {
         self.session = session
+        self.isMultiTrackAudioMixingEnabled = isMultiTrackAudioMixingEnabled
     }
 
     #if os(iOS) || os(macOS) || os(tvOS)
