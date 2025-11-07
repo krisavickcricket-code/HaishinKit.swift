@@ -182,4 +182,11 @@ public final class Screen: ScreenObjectContainerConvertible {
         root.draw(renderer)
         return sampleBuffer
     }
+
+    func reset() {
+        let screens: [VideoTrackScreenObject] = root.getScreenObjects()
+        for screen in screens {
+            screen.reset()
+        }
+    }
 }

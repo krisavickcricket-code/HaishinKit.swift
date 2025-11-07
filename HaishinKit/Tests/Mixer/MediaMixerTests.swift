@@ -18,10 +18,27 @@ import Testing
         try await mixer.configuration(video: 0) { _ in }
     }
 
-    @Test func release() {
+    @Test func release() async {
         weak var weakMixer: MediaMixer?
-        _ = {
+        _ = await {
             let mixer = MediaMixer(captureSessionMode: .manual)
+            await mixer.startRunning()
+            try? await Task.sleep(nanoseconds: 1)
+            await mixer.stopRunning()
+            try? await Task.sleep(nanoseconds: 1)
+            weakMixer = mixer
+        }()
+        #expect(weakMixer == nil)
+    }
+
+    @Test func release_with_multimode() async {
+        weak var weakMixer: MediaMixer?
+        _ = await {
+            let mixer = MediaMixer(captureSessionMode: .multi)
+            await mixer.startRunning()
+            try? await Task.sleep(nanoseconds: 1)
+            await mixer.stopRunning()
+            try? await Task.sleep(nanoseconds: 1)
             weakMixer = mixer
         }()
         #expect(weakMixer == nil)

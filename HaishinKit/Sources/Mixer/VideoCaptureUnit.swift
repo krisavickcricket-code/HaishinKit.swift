@@ -50,26 +50,17 @@ final class VideoCaptureUnit: CaptureUnit {
     }
     #endif
 
-    var inputs: AsyncStream<(UInt8, CMSampleBuffer)> {
-        AsyncStream<(UInt8, CMSampleBuffer)> { continutation in
-            self.inputsContinuation = continutation
-        }
-    }
+    @AsyncStreamedFlow
+    var inputs: AsyncStream<(UInt8, CMSampleBuffer)>
 
-    var output: AsyncStream<CMSampleBuffer> {
-        AsyncStream<CMSampleBuffer> { continutation in
-            self.outputContinuation = continutation
-        }
-    }
+    @AsyncStreamedFlow
+    var output: AsyncStream<CMSampleBuffer>
 
     private lazy var videoMixer = {
         var videoMixer = VideoMixer<VideoCaptureUnit>()
         videoMixer.delegate = self
         return videoMixer
     }()
-
-    private var outputContinuation: AsyncStream<CMSampleBuffer>.Continuation?
-    private var inputsContinuation: AsyncStream<(UInt8, CMSampleBuffer)>.Continuation?
 
     #if os(tvOS)
     private var _devices: [UInt8: Any] = [:]
@@ -143,8 +134,8 @@ final class VideoCaptureUnit: CaptureUnit {
     }
 
     func finish() {
-        inputsContinuation?.finish()
-        outputContinuation?.finish()
+        _inputs.finish()
+        _output.finish()
     }
 
     @available(tvOS 17.0, *)
@@ -166,10 +157,10 @@ final class VideoCaptureUnit: CaptureUnit {
 extension VideoCaptureUnit: VideoMixerDelegate {
     // MARK: VideoMixerDelegate
     func videoMixer(_ videoMixer: VideoMixer<VideoCaptureUnit>, track: UInt8, didInput sampleBuffer: CMSampleBuffer) {
-        inputsContinuation?.yield((track, sampleBuffer))
+        _inputs.yield((track, sampleBuffer))
     }
 
     func videoMixer(_ videoMixer: VideoMixer<VideoCaptureUnit>, didOutput sampleBuffer: CMSampleBuffer) {
-        outputContinuation?.yield(sampleBuffer)
+        _output.yield(sampleBuffer)
     }
 }
