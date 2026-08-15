@@ -1,4 +1,4 @@
-// swift-tools-version:5.3
+// swift-tools-version:5.9
 // Lowered from 6.0 to 5.3 to compile in Swift 5 mode (no strict concurrency checking).
 // This fixes the "sending iterator risks causing data races" error in RTMPConnection.swift.
 import PackageDescription
