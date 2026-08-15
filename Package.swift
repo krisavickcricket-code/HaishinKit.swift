@@ -1,12 +1,9 @@
-// swift-tools-version:6.0
-// The swift-tools-version declares the minimum version of Swift required to build this package.
+// swift-tools-version:5.3
+// Lowered from 6.0 to 5.3 to compile in Swift 5 mode (no strict concurrency checking).
+// This fixes the "sending iterator risks causing data races" error in RTMPConnection.swift.
 import PackageDescription
 
-// Force Swift 5 language mode to avoid Swift 6 strict concurrency errors
-// in RTMPConnection.swift and other files. The app uses SWIFT_STRICT_CONCURRENCY=minimal.
-let swiftSettings: [SwiftSetting] = [
-    .enableUpcomingFeature("ExistentialAny")
-]
+let swiftSettings: [SwiftSetting] = []
 
 let package = Package(
     name: "HaishinKit",
@@ -43,36 +40,31 @@ let package = Package(
             name: "HaishinKit",
             dependencies: ["Logboard"],
             path: "HaishinKit/Sources",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "RTMPHaishinKit",
             dependencies: ["HaishinKit"],
             path: "RTMPHaishinKit/Sources",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "SRTHaishinKit",
             dependencies: ["libsrt", "HaishinKit"],
             path: "SRTHaishinKit/Sources",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "MoQTHaishinKit",
             dependencies: ["HaishinKit"],
             path: "MoQTHaishinKit/Sources",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "RTCHaishinKit",
             dependencies: ["libdatachannel", "HaishinKit"],
             path: "RTCHaishinKit/Sources",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "HaishinKitTests",
@@ -81,29 +73,25 @@ let package = Package(
             resources: [
                 .process("Asset")
             ],
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "RTMPHaishinKitTests",
             dependencies: ["RTMPHaishinKit"],
             path: "RTMPHaishinKit/Tests",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "SRTHaishinKitTests",
             dependencies: ["SRTHaishinKit"],
             path: "SRTHaishinKit/Tests",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "RTCHaishinKitTests",
             dependencies: ["RTCHaishinKit"],
             path: "RTCHaishinKit/Tests",
-            swiftSettings: swiftSettings,
-            swiftLanguageMode: .v5
+            swiftSettings: swiftSettings
         )
     ]
 )
