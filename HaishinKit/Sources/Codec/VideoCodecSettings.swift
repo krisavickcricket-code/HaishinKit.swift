@@ -149,13 +149,20 @@ public struct VideoCodecSettings: Codable, Sendable {
     }
 
     func invalidateSession(_ rhs: VideoCodecSettings) -> Bool {
+        // CricNode fork: dataRateLimits is deliberately NOT in this list.
+        // kVTCompressionPropertyKey_DataRateLimits is live-settable, so
+        // `apply(_:rhs:)` patches it in place. Previously every limits
+        // change invalidated the session: adaptive-bitrate strategies that
+        // move both bitRate and dataRateLimits (CricNode's does) rebuilt
+        // the whole VTCompressionSession on every adjustment step —
+        // encoder churn + forced keyframe + frame stalls on congested
+        // cellular uplinks during multi-hour streams.
         return !(videoSize == rhs.videoSize &&
                     maxKeyFrameIntervalDuration == rhs.maxKeyFrameIntervalDuration &&
                     scalingMode == rhs.scalingMode &&
                     allowFrameReordering == rhs.allowFrameReordering &&
                     bitRateMode == rhs.bitRateMode &&
                     profileLevel == rhs.profileLevel &&
-                    dataRateLimits == rhs.dataRateLimits &&
                     isLowLatencyRateControlEnabled == rhs.isLowLatencyRateControlEnabled &&
                     isHardwareAcceleratedEnabled == rhs.isHardwareAcceleratedEnabled
         )
@@ -166,6 +173,13 @@ public struct VideoCodecSettings: Codable, Sendable {
             logger.info("bitRate change from ", rhs.bitRate, " to ", bitRate)
             let option = VTSessionOption(key: bitRateMode.key, value: NSNumber(value: bitRate))
             _ = codec.session?.setOption(option)
+        }
+        if bitRateMode == .average, dataRateLimits != rhs.dataRateLimits, let limits = normalizedDataRateLimits {
+            // Live-settable property: patch the running session instead of
+            // recreating it. (New-nil case intentionally skipped — clearing a
+            // live cap mid-stream is riskier than leaving it in place.)
+            logger.info("dataRateLimits change from ", rhs.dataRateLimits ?? [], " to ", limits)
+            _ = codec.session?.setOption(.init(key: .dataRateLimits, value: limits as NSArray))
         }
         if frameInterval != rhs.frameInterval {
             codec.frameInterval = frameInterval
@@ -187,13 +201,8 @@ public struct VideoCodecSettings: Codable, Sendable {
                 "ScalingMode": scalingMode.rawValue
             ] as NSObject)
         ])
-        if bitRateMode == .average {
-            if let dataRateLimits, dataRateLimits.count == 2 {
-                var limits = [Double](repeating: 0.0, count: 2)
-                limits[0] = dataRateLimits[0] == 0 ? Double(bitRate) / 8 * 1.5 : dataRateLimits[0]
-                limits[1] = dataRateLimits[1] == 0 ? Double(1.0) : dataRateLimits[1]
-                options.insert(.init(key: .dataRateLimits, value: limits as NSArray))
-            }
+        if bitRateMode == .average, let limits = normalizedDataRateLimits {
+            options.insert(.init(key: .dataRateLimits, value: limits as NSArray))
         }
         #if os(macOS)
         if isHardwareAcceleratedEnabled {
@@ -213,5 +222,18 @@ public struct VideoCodecSettings: Codable, Sendable {
             return [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true as CFBoolean] as CFDictionary
         }
         return nil
+    }
+
+    /// The two-element [bytes, seconds] data-rate limit pair with the same
+    /// zero-fill normalization used at session creation (`bitRate / 8 * 1.5`
+    /// bytes over 1 s when unset), or nil when no usable limits are set.
+    private var normalizedDataRateLimits: [Double]? {
+        guard let dataRateLimits, dataRateLimits.count == 2 else {
+            return nil
+        }
+        var limits = [Double](repeating: 0.0, count: 2)
+        limits[0] = dataRateLimits[0] == 0 ? Double(bitRate) / 8 * 1.5 : dataRateLimits[0]
+        limits[1] = dataRateLimits[1] == 0 ? Double(1.0) : dataRateLimits[1]
+        return limits
     }
 }
