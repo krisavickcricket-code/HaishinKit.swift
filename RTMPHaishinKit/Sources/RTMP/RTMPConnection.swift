@@ -234,6 +234,14 @@ public actor RTMPConnection: HaishinKit.NetworkConnection {
         }
     }
     private var windowSizeS = RTMPConnection.defaultWindowSizeS
+    /// CricNode 1.0.42: Wall-clock time the SERVER last acknowledged received
+    /// bytes (RTMP Acknowledgement against our announced window). Socket-write
+    /// success says nothing about delivery — a silently dead uplink accepts
+    /// writes into the kernel buffer for minutes while the ingest starves.
+    /// Server acks are the delivery truth: the app watchdog uses the age of
+    /// this timestamp to detect a black-holed uplink and reconnect inside the
+    /// ingest's starvation window. Actor-isolated: read with `await`.
+    public private(set) var lastServerAcknowledgementAt: Date?
     private var outputBuffer = RTMPChunkBuffer()
     private let authenticator = RTMPAuthenticator()
     private var networkMonitor: NetworkMonitor?
@@ -521,9 +529,23 @@ public actor RTMPConnection: HaishinKit.NetworkConnection {
             switch message {
             case let message as RTMPSetChunkSizeMessage:
                 chunkSizeC = Int(message.size)
+            case is RTMPAcknowledgementMessage:
+                // CricNode 1.0.42: the server acknowledged received bytes —
+                // the delivery signal (see lastServerAcknowledgementAt).
+                // Previously parsed and dropped.
+                lastServerAcknowledgementAt = Date()
             case let message as RTMPWindowAcknowledgementSizeMessage:
-                windowSizeC = Int64(message.size)
+                // CricNode 1.0.42: windowSizeS (the SERVER's window — how often
+                // WE must ack the server) comes from this message. windowSizeC
+                // (the window WE announce — how often the SERVER should ack US)
+                // must stay at our fixed default: the previous
+                // `windowSizeC = message.size` echoed the server's own window
+                // back at it (via the didSet re-announce), co-opting our ack
+                // cadence to the server's value. Announce our tight 250KB window
+                // at this handshake exchange moment so server acks land at a
+                // sub-second-to-second cadence at stream bitrates.
                 windowSizeS = Int64(message.size)
+                doOutput(.zero, chunkStreamId: .control, message: RTMPWindowAcknowledgementSizeMessage(size: UInt32(windowSizeC)))
             case let message as RTMPSetPeerBandwidthMessage:
                 bandWidth = message.size
             case let message as RTMPCommandMessage:
