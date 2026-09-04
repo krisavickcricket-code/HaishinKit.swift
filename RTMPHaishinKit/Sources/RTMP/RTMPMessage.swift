@@ -462,7 +462,13 @@ struct RTMPAudioMessage: RTMPMessage {
  7.1.5. Video Message (9)
  */
 struct RTMPVideoMessage: RTMPMessage {
-    static let ctsOffset = 0.066
+    // CricNode fork: 0.0 — the FLV/Enhanced-RTMP CompositionTime field is
+    // defined as PTS - DTS, exactly. The inherited 0.066 offset inflated
+    // every CTS by 66 ms, which was dead weight while encoders emitted no
+    // B-frames (DTS invalid -> getCompositionTime returns 0) but becomes a
+    // live 66 ms presentation skew the moment reordering is enabled and
+    // VideoToolbox starts emitting decode-ordered frames with valid DTS.
+    static let ctsOffset = 0.0
 
     // MARK: RTMPMessage
     let type: RTMPMessageType = .video
