@@ -201,6 +201,23 @@ public struct VideoCodecSettings: Codable, Sendable {
                 "ScalingMode": scalingMode.rawValue
             ] as NSObject)
         ])
+        // CricNode fork: pair the GOP duration with a frame-COUNT interval.
+        // Several hardware encoders (HEVC on recent iPhones observed) ignore
+        // kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration unless a
+        // MaxKeyFrameInterval count is also present — keyframes then fall
+        // back to automatic/scene-change placement (~8 s gaps on a static
+        // camera) and YouTube's ingest warns "keyframe frequency > 4 s".
+        // The count is derived from the ACTIVE frame gate (frameInterval =
+        // 1/fps − 0.001), with a 0.5 s margin under the ingest limit so the
+        // realized interval always clears YouTube's <= 4 s check at every
+        // fps tier (20/30/60 and the congestion floors 10/5).
+        if frameInterval > 0 {
+            // Real fps (frameInterval is 1/fps − 0.001): at 20/30/60 fps the
+            // counts are 70/105/210 frames = 3.5 s GOPs; at the congestion
+            // floors (10/5 fps) 35/17 frames — all hard-bounded under 4 s.
+            let count = Int32(((Double(maxKeyFrameIntervalDuration) - 0.5) / (frameInterval + 0.001)).rounded(.down))
+            options.insert(.init(key: .maxKeyFrameInterval, value: NSNumber(value: count)))
+        }
         if bitRateMode == .average, let limits = normalizedDataRateLimits {
             options.insert(.init(key: .dataRateLimits, value: limits as NSArray))
         }
