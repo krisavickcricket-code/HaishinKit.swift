@@ -36,6 +36,10 @@ final class VideoCodec {
     private var continuation: AsyncStream<CMSampleBuffer>.Continuation?
     private var isInvalidateSession = true
     private var presentationTimeStamp: CMTime = .zero
+    /// Next due slot (seconds, PTS domain) of the frame-dropping gate.
+    private var nextFrameDue: Double = 0
+    /// Whether `nextFrameDue` is armed (false = the next frame anchors it).
+    private var hasFrameDue = false
     private(set) var isRunning = false
     private(set) var inputFormat: CMFormatDescription? {
         didSet {
@@ -99,6 +103,19 @@ final class VideoCodec {
         }
     }
 
+    /// Frame-dropping gate for the target cadence (`frameInterval`, seconds).
+    ///
+    /// v2026-09 fork fix (upstream bug): the previous minimum-gap comparison
+    /// never stored the accepted frame's PTS (`presentationTimeStamp` stayed
+    /// .zero), so the gate compared against seconds-since-start and passed
+    /// EVERY frame — the throttle was a no-op and the stream always ran at
+    /// capture fps. The gate now writes back the accepted PTS and paces with
+    /// a Bresenham accumulator: the candidate frame is encoded when it
+    /// reaches the next due slot and the remainder is carried, so ANY
+    /// capture/target ratio holds its exact average (a minimum-gap gate only
+    /// yields capture-rate divisors — a 20 fps target off a 30 fps capture
+    /// realized 15). Long gaps (background/resume) re-anchor so a stale due
+    /// slot never emits a burst.
     private func useFrame(_ presentationTimeStamp: CMTime) -> Bool {
         guard startedAt <= presentationTimeStamp else {
             return false
@@ -107,9 +124,21 @@ final class VideoCodec {
             return false
         }
         guard Self.frameInterval < frameInterval else {
+            self.presentationTimeStamp = presentationTimeStamp
             return true
         }
-        return frameInterval <= presentationTimeStamp.seconds - self.presentationTimeStamp.seconds
+        let pts = presentationTimeStamp.seconds
+        if hasFrameDue, pts < nextFrameDue {
+            return false
+        }
+        if hasFrameDue, pts - nextFrameDue <= frameInterval * 2 {
+            nextFrameDue += frameInterval
+        } else {
+            nextFrameDue = pts + frameInterval
+        }
+        hasFrameDue = true
+        self.presentationTimeStamp = presentationTimeStamp
+        return true
     }
 
     #if os(iOS) || os(tvOS) || os(visionOS)
@@ -171,6 +200,8 @@ extension VideoCodec: Runner {
         inputFormat = nil
         outputFormat = nil
         presentationTimeStamp = .zero
+        nextFrameDue = 0
+        hasFrameDue = false
         continuation?.finish()
         startedAt = .zero
         #if os(iOS) || os(tvOS) || os(visionOS)
