@@ -19,6 +19,15 @@ final class AudioRingBuffer {
     private var tail = 0
     private var skip = 0
     private var sampleTime: AVAudioFramePosition = 0
+    /// Host time at which the next input buffer was expected to arrive, derived
+    /// from the previous buffer's frame count and the input sample rate.
+    private var expectedNextArrivalHostTime: UInt64?
+    /// A late arrival shorter than this is ordinary scheduling jitter, not an outage.
+    private static let outageEpsilonSeconds: Double = 0.25
+    /// Seconds the ring clock was advanced by at the last append because a
+    /// microphone outage went unreported by the capture timeline. The mixer
+    /// mirrors this on its output timeline.
+    private(set) var lastClockJumpSeconds = 0.0
     private var inputFormat: AVAudioFormat
     private var inputBuffer: AVAudioPCMBuffer
     private var outputBuffer: AVAudioPCMBuffer
@@ -42,14 +51,20 @@ final class AudioRingBuffer {
     }
 
     func append(_ sampleBuffer: CMSampleBuffer) {
+        lastClockJumpSeconds = 0
         guard CMSampleBufferDataIsReady(sampleBuffer) else {
             return
         }
+        // Wall-clock lateness of this buffer against the arrival the previous
+        // buffer implied. A microphone outage the capture timeline never reports
+        // shows up here as a large value.
+        let sampleRate = inputBuffer.format.sampleRate
+        let wallGap = lateArrivalSeconds(inputSamples: Int(sampleBuffer.numSamples), sampleRate: sampleRate)
         let targetSampleTime: CMTimeValue
-        if sampleBuffer.presentationTimeStamp.timescale == Int32(inputBuffer.format.sampleRate) {
+        if sampleBuffer.presentationTimeStamp.timescale == Int32(sampleRate) {
             targetSampleTime = sampleBuffer.presentationTimeStamp.value
         } else {
-            targetSampleTime = Int64(Double(sampleBuffer.presentationTimeStamp.value) * inputBuffer.format.sampleRate / Double(sampleBuffer.presentationTimeStamp.timescale))
+            targetSampleTime = Int64(Double(sampleBuffer.presentationTimeStamp.value) * sampleRate / Double(sampleBuffer.presentationTimeStamp.timescale))
         }
         if sampleTime == 0 {
             sampleTime = targetSampleTime
@@ -83,11 +98,16 @@ final class AudioRingBuffer {
             }
         }
         skip = max(Int(targetSampleTime - sampleTime), 0)
-        sampleTime += Int64(skip)
+        let clockJump = outageJumpSamples(wallGap: wallGap, captureSkip: skip, sampleRate: sampleRate)
+        lastClockJumpSeconds = 0 < sampleRate ? Double(clockJump) / sampleRate : 0
+        sampleTime += Int64(skip + clockJump)
         append(inputBuffer)
     }
 
     func append(_ audioPCMBuffer: AVAudioPCMBuffer, when: AVAudioTime) {
+        lastClockJumpSeconds = 0
+        let sampleRate = inputBuffer.format.sampleRate
+        let wallGap = lateArrivalSeconds(inputSamples: Int(audioPCMBuffer.frameLength), sampleRate: sampleRate)
         if sampleTime == 0 {
             sampleTime = when.sampleTime
         }
@@ -99,7 +119,9 @@ final class AudioRingBuffer {
         inputBuffer.frameLength = audioPCMBuffer.frameLength
         _ = inputBuffer.copy(audioPCMBuffer)
         skip = Int(max(when.sampleTime - sampleTime, 0))
-        sampleTime += Int64(skip)
+        let clockJump = outageJumpSamples(wallGap: wallGap, captureSkip: skip, sampleRate: sampleRate)
+        lastClockJumpSeconds = 0 < sampleRate ? Double(clockJump) / sampleRate : 0
+        sampleTime += Int64(skip + clockJump)
         append(inputBuffer)
     }
 
@@ -179,6 +201,40 @@ final class AudioRingBuffer {
             }
         }
         return noErr
+    }
+
+    /// Seconds late this buffer arrived relative to the arrival the previous
+    /// buffer's samples implied. Returns 0 for the first buffer and for on-time
+    /// arrivals.
+    private func lateArrivalSeconds(inputSamples: Int, sampleRate: Double) -> Double {
+        let now = mach_absolute_time()
+        defer {
+            let duration = 0 < sampleRate ? Double(inputSamples) / sampleRate : 0
+            let expected = AVAudioTime.hostTime(forSeconds: duration)
+            expectedNextArrivalHostTime = max(now, expectedNextArrivalHostTime ?? now) + expected
+        }
+        guard let expectedNext = expectedNextArrivalHostTime, now > expectedNext else {
+            return 0
+        }
+        return AVAudioTime.seconds(forHostTime: now - expectedNext)
+    }
+
+    /// Input samples to advance the ring clock by for a microphone outage the
+    /// capture clock did not report.
+    ///
+    /// When an audio-session interruption ends (a phone call, another app taking
+    /// the mic), the resumed capture timeline sometimes continues *behind* ours
+    /// instead of jumping forward by the outage. The capture-derived `skip` is
+    /// then 0, and every later buffer would be pulled early by the outage length
+    /// — audio running ahead of video for the rest of the recording. Wall-clock
+    /// lateness is the authority in that case. When the capture clock *does*
+    /// report the gap, `skip` is already non-zero and is left untouched, so the
+    /// two can never double-count.
+    private func outageJumpSamples(wallGap: Double, captureSkip: Int, sampleRate: Double) -> Int {
+        guard captureSkip == 0, Self.outageEpsilonSeconds < wallGap, 0 < sampleRate else {
+            return 0
+        }
+        return Int(wallGap * sampleRate)
     }
 
     func reset() {

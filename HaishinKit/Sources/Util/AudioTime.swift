@@ -24,6 +24,16 @@ final class AudioTime {
         sampleTime += count
     }
 
+    /// Advances the timeline by a duration rather than a frame count — used to
+    /// step over a microphone outage that the capture timeline did not report,
+    /// so audio after the outage keeps its true wall-clock position.
+    func advanced(seconds: Double) {
+        guard 0 < sampleRate else {
+            return
+        }
+        sampleTime += AVAudioFramePosition(seconds * sampleRate)
+    }
+
     func anchor(_ time: CMTime, sampleRate: Double) {
         guard anchorTime == nil else {
             return

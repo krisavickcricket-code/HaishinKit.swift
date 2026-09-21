@@ -117,6 +117,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
             audioTime.anchor(sampleBuffer.presentationTimeStamp, sampleRate: outputFormat.sampleRate)
         }
         ringBuffer?.append(sampleBuffer)
+        applyOutageClockJump()
         resample()
     }
 
@@ -126,7 +127,22 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
             audioTime.anchor(when)
         }
         ringBuffer?.append(audioBuffer, when: when)
+        applyOutageClockJump()
         resample()
+    }
+
+    /// Mirrors the ring buffer's microphone-outage clock jump on the output
+    /// timeline. The ring advances its own clock when an interruption ends on a
+    /// capture timeline that never reported the elapsed time; without the same
+    /// step here every block after the outage would be stamped early by the
+    /// outage length (audio running ahead of video). Must run before `resample()`
+    /// so the blocks emitted by this append already carry the corrected time.
+    @inline(__always)
+    private func applyOutageClockJump() {
+        guard let ringBuffer, 0 < ringBuffer.lastClockJumpSeconds else {
+            return
+        }
+        audioTime.advanced(seconds: ringBuffer.lastClockJumpSeconds)
     }
 
     @inline(__always)
