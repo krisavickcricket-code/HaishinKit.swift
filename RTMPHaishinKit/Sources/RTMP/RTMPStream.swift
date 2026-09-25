@@ -220,6 +220,31 @@ public actor RTMPStream {
     private var dataTimestamps: [String: Date] = .init()
     private var audioTimestamp: RTMPTimestamp<AVAudioTime> = .init()
     private var videoTimestamp: RTMPTimestamp<CMTime> = .init()
+    // Outgoing A/V shared timestamp base. RTMP only carries per-chunk-stream
+    // delta timestamps, so the absolute timestamp of each track's first data
+    // message is the only cross-track alignment information a player gets.
+    // Anchoring both tracks at 0 erases the true capture-time offset between
+    // the first video frame and the first audio chunk at go-live: when video
+    // stabilization is on, the camera pipeline holds frames to compute the
+    // compensation, so the first video frame to emerge after going live was
+    // captured Δ earlier than the first audio chunk, and per-track anchoring
+    // then made the whole video track play Δ behind the audio for the entire
+    // stream. Both tracks are therefore stamped from ONE shared base (the
+    // first video frame's decode timestamp), preserving true capture-time
+    // deltas — port of Moblin's RtmpStream.rebaseTimeStamp with an IDR-safe
+    // anchor order (video always anchors first, so the first keyframe is
+    // never dropped).
+    private var outgoingBaseTimeStamp: Double = -1.0
+    private var prevRebasedVideoSeconds: Double?
+    private var prevRebasedAudioSeconds: Double?
+    private var videoTimeStampDelta: Double = 0.0
+    private var audioTimeStampDelta: Double = 0.0
+    // Audio that arrives before the base is known, buffered so it can be sent
+    // with its true timestamp once the first video frame anchors the base.
+    // If no video ever arrives (audio-only publishing), the oldest held
+    // buffer anchors the base instead, so audio-only streams keep working.
+    private var pendingAudio: [(AVAudioCompressedBuffer, AVAudioTime)] = []
+    private static let pendingAudioLimit = 30
     private var requestTimeout = RTMPConnection.defaultRequestTimeout
     private var expectedResponse: Code?
     package var bitRateStrategy: (any StreamBitRateStrategy)?
@@ -384,6 +409,7 @@ public actor RTMPStream {
             info.resourceName = name
             howToPublish = type
             startedAt = .init()
+            resetOutgoingTimeStamps()
             metadata = makeMetadata()
             readyState = .publishing
             try? send("@setDataFrame", arguments: "onMetaData", metadata)
@@ -724,18 +750,16 @@ extension RTMPStream: _Stream {
         switch sampleBuffer.formatDescription?.mediaType {
         case .video:
             if sampleBuffer.formatDescription?.isCompressed == true {
-                do {
-                    let decodeTimeStamp = sampleBuffer.decodeTimeStamp.isValid ? sampleBuffer.decodeTimeStamp : sampleBuffer.presentationTimeStamp
-                    let timedelta = try videoTimestamp.update(decodeTimeStamp)
-                    frameCount += 1
-                    videoFormat = sampleBuffer.formatDescription
-                    guard let message = RTMPVideoMessage(streamId: id, timestamp: timedelta, sampleBuffer: sampleBuffer) else {
-                        return
-                    }
-                    doOutput(.one, chunkStreamId: .video, message: message)
-                } catch {
-                    logger.warn(error)
+                let decodeTimeStamp = sampleBuffer.decodeTimeStamp.isValid ? sampleBuffer.decodeTimeStamp : sampleBuffer.presentationTimeStamp
+                guard let timedelta = outgoingVideoTimeStamp(decodeTimeStamp) else {
+                    return
                 }
+                frameCount += 1
+                videoFormat = sampleBuffer.formatDescription
+                guard let message = RTMPVideoMessage(streamId: id, timestamp: timedelta, sampleBuffer: sampleBuffer) else {
+                    return
+                }
+                doOutput(.one, chunkStreamId: .video, message: message)
             } else {
                 outgoing.append(sampleBuffer)
                 if sampleBuffer.formatDescription?.isCompressed == false {
@@ -763,16 +787,26 @@ extension RTMPStream: _Stream {
     public func append(_ audioBuffer: AVAudioBuffer, when: AVAudioTime) {
         switch audioBuffer {
         case let audioBuffer as AVAudioCompressedBuffer:
-            do {
-                let timedelta = try audioTimestamp.update(when)
-                audioFormat = audioBuffer.format
-                guard let message = RTMPAudioMessage(streamId: id, timestamp: timedelta, audioBuffer: audioBuffer) else {
-                    return
+            if outgoingBaseTimeStamp < 0 {
+                // Hold audio until the first video frame anchors the shared
+                // base, then flush it with its true timestamps. Falls back to
+                // anchoring on the oldest held audio for audio-only publishing.
+                pendingAudio.append((audioBuffer, when))
+                if pendingAudio.count > Self.pendingAudioLimit {
+                    outgoingBaseTimeStamp = pendingAudio[0].1.seconds
+                    logger.info("rtmp: no video anchor; falling back to an audio-only timestamp base")
+                    flushPendingAudio()
                 }
-                doOutput(.one, chunkStreamId: .audio, message: message)
-            } catch {
-                logger.warn(error)
+                return
             }
+            guard let timedelta = outgoingAudioTimeStamp(when) else {
+                return
+            }
+            audioFormat = audioBuffer.format
+            guard let message = RTMPAudioMessage(streamId: id, timestamp: timedelta, audioBuffer: audioBuffer) else {
+                return
+            }
+            doOutput(.one, chunkStreamId: .audio, message: message)
         default:
             outgoing.append(audioBuffer, when: when)
             if audioBuffer is AVAudioPCMBuffer && audioSampleAccess {
@@ -786,6 +820,78 @@ extension RTMPStream: _Stream {
         currentFPS = frameCount
         frameCount = 0
         info.update()
+    }
+}
+
+extension RTMPStream {
+    // MARK: - Outgoing shared-base timestamps
+
+    private func resetOutgoingTimeStamps() {
+        outgoingBaseTimeStamp = -1.0
+        prevRebasedVideoSeconds = nil
+        prevRebasedAudioSeconds = nil
+        videoTimeStampDelta = 0.0
+        audioTimeStampDelta = 0.0
+        pendingAudio.removeAll()
+    }
+
+    /// Stamps a compressed video frame from the shared base. The first video
+    /// frame's decode timestamp anchors the base (never dropped, so the first
+    /// keyframe always carries timestamp 0). Out-of-order frames are dropped.
+    private func outgoingVideoTimeStamp(_ decodeTimeStamp: CMTime) -> UInt32? {
+        if outgoingBaseTimeStamp < 0 {
+            outgoingBaseTimeStamp = decodeTimeStamp.seconds
+            flushPendingAudio()
+        }
+        let rebased = decodeTimeStamp.seconds - outgoingBaseTimeStamp
+        guard rebased >= 0 else {
+            logger.info("rtmp: dropping video buffer before the timestamp base (\(rebased))")
+            return nil
+        }
+        if let prevRebasedVideoSeconds, rebased < prevRebasedVideoSeconds {
+            logger.info("rtmp: dropping out-of-order video buffer (\(rebased) < \(prevRebasedVideoSeconds))")
+            return nil
+        }
+        prevRebasedVideoSeconds = rebased
+        videoTimeStampDelta = rebased * 1000.0
+        return UInt32(videoTimeStampDelta)
+    }
+
+    /// Stamps a compressed audio packet from the shared base. Returns nil
+    /// while the base is unset (the packet is buffered) or for out-of-order
+    /// packets, which are dropped.
+    private func outgoingAudioTimeStamp(_ when: AVAudioTime) -> UInt32? {
+        let rebased = when.seconds - outgoingBaseTimeStamp
+        guard rebased >= 0 else {
+            logger.info("rtmp: dropping audio buffer before the timestamp base (\(rebased))")
+            return nil
+        }
+        if let prevRebasedAudioSeconds, rebased < prevRebasedAudioSeconds {
+            logger.info("rtmp: dropping out-of-order audio buffer (\(rebased) < \(prevRebasedAudioSeconds))")
+            return nil
+        }
+        prevRebasedAudioSeconds = rebased
+        audioTimeStampDelta = rebased * 1000.0
+        return UInt32(audioTimeStampDelta)
+    }
+
+    private func flushPendingAudio() {
+        let buffered = pendingAudio
+        pendingAudio.removeAll()
+        guard !buffered.isEmpty else {
+            return
+        }
+        logger.info("rtmp: flushing \(buffered.count) audio buffer(s) held before the video timestamp base")
+        for (audioBuffer, when) in buffered {
+            guard let timedelta = outgoingAudioTimeStamp(when) else {
+                continue
+            }
+            audioFormat = audioBuffer.format
+            guard let message = RTMPAudioMessage(streamId: id, timestamp: timedelta, audioBuffer: audioBuffer) else {
+                continue
+            }
+            doOutput(.one, chunkStreamId: .audio, message: message)
+        }
     }
 }
 
