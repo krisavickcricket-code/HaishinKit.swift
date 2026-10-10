@@ -317,6 +317,14 @@ public final actor MediaMixer {
     /// Configurations for the AVCaptureSession.
     /// - Attention: Internally, there is no need for developers to call beginConfiguration() and func commitConfiguration() as they are called automatically.
     @available(tvOS 17.0, *)
+    /// Read-only audio-timeline telemetry (wall re-anchors + capture-outage
+    /// jumps) for field-log surfacing. The stamp timeline is the single A/V
+    /// alignment authority downstream; any non-zero re-anchor total is a
+    /// proven desync event the capture clock never reported.
+    public func audioTimelineTelemetry(track: UInt8 = 0) -> AudioTimelineTelemetry? {
+        audioIO.audioTimelineTelemetry(track: track)
+    }
+
     public func configuration(_ lambda: @Sendable (_ session: AVCaptureSession) throws -> Void) rethrows {
         try session.configuration(lambda)
     }

@@ -15,6 +15,18 @@ final class AudioRingBuffer {
         return Int(outputBuffer.frameLength) - tail + head + skip
     }
 
+    /// Timeline seconds still owed by the ring: silence-fill debt (capture-PTS
+    /// gaps awaiting a starved render) plus buffered-but-unrendered samples.
+    /// The mixer track's wall re-anchor subtracts this from the timeline-vs-wall
+    /// lag so a lag the ring will fill never triggers a correction — content
+    /// captured through a delivery stall, still draining, owns its window.
+    var owedSeconds: Double {
+        guard 0 < inputFormat.sampleRate else {
+            return 0
+        }
+        return Double(counts) / inputFormat.sampleRate
+    }
+
     private var head = 0
     private var tail = 0
     private var skip = 0
