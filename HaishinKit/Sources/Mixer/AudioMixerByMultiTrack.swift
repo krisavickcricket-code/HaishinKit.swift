@@ -90,10 +90,6 @@ final class AudioMixerByMultiTrack: AudioMixer {
         self.track(for: track)?.append(buffer, when: when)
     }
 
-    func audioTimelineTelemetry(track: UInt8) -> AudioTimelineTelemetry? {
-        self.track(for: track)?.audioTimelineTelemetry ?? tracks[settings.mainTrack]?.audioTimelineTelemetry
-    }
-
     private func tryToSetupAudioNodes() {
         do {
             try setupAudioNodes()

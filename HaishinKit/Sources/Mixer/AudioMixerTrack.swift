@@ -40,6 +40,63 @@ public struct AudioTimelineTelemetry: Sendable {
     public let totalClockJumpSeconds: Double
 }
 
+/// Lock-backed global registry the audio mixer tracks report their timeline
+/// corrections into, so a reader can observe them synchronously from any
+/// queue (MediaMixer is an actor; its stamp timeline must be observable
+/// without entering the actor or hopping to it). Assumes one mixer per
+/// process — the running app's shape — with tracks keyed by their UInt8 id.
+public final class AudioTimelineTelemetryRegistry: @unchecked Sendable {
+    public static let shared = AudioTimelineTelemetryRegistry()
+
+    private struct Entry {
+        var lastWallReanchorSeconds: Double = 0
+        var totalWallReanchorSeconds: Double = 0
+        var wallReanchorCount = 0
+        var totalClockJumpSeconds: Double = 0
+    }
+
+    private let lock = NSLock()
+    private var entries: [UInt8: Entry] = [:]
+
+    public func telemetry(track: UInt8) -> AudioTimelineTelemetry? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[track] else {
+            return nil
+        }
+        return AudioTimelineTelemetry(
+            lastWallReanchorSeconds: entry.lastWallReanchorSeconds,
+            totalWallReanchorSeconds: entry.totalWallReanchorSeconds,
+            wallReanchorCount: entry.wallReanchorCount,
+            totalClockJumpSeconds: entry.totalClockJumpSeconds
+        )
+    }
+
+    fileprivate func recordWallReanchor(track: UInt8, seconds: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        var entry = entries[track] ?? Entry()
+        entry.lastWallReanchorSeconds = seconds
+        entry.totalWallReanchorSeconds += seconds
+        entry.wallReanchorCount += 1
+        entries[track] = entry
+    }
+
+    fileprivate func recordClockJump(track: UInt8, seconds: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        var entry = entries[track] ?? Entry()
+        entry.totalClockJumpSeconds += seconds
+        entries[track] = entry
+    }
+
+    fileprivate func clearLastWallReanchor(track: UInt8) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[track]?.lastWallReanchorSeconds = 0
+    }
+}
+
 protocol AudioMixerTrackDelegate: AnyObject {
     func track(_ track: AudioMixerTrack<Self>, didOutput audioPCMBuffer: AVAudioPCMBuffer, when: AVAudioTime)
     func track(_ track: AudioMixerTrack<Self>, errorOccurred error: AudioMixerError)
@@ -147,37 +204,12 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
 
     private var wallLagFirstSeenMachSeconds: Double = 0
 
-    private let telemetryLock = NSLock()
-    private var _lastWallReanchorSeconds: Double = 0
-    private var _totalWallReanchorSeconds: Double = 0
-    private var _wallReanchorCount = 0
-    private var _totalClockJumpSeconds: Double = 0
-
-    /// Current audio-timeline telemetry. Safe to read from any queue; the
-    /// append path runs on the capture callback queue.
-    var audioTimelineTelemetry: AudioTimelineTelemetry {
-        telemetryLock.lock()
-        defer { telemetryLock.unlock() }
-        return AudioTimelineTelemetry(
-            lastWallReanchorSeconds: _lastWallReanchorSeconds,
-            totalWallReanchorSeconds: _totalWallReanchorSeconds,
-            wallReanchorCount: _wallReanchorCount,
-            totalClockJumpSeconds: _totalClockJumpSeconds
-        )
-    }
-
     private func recordWallReanchor(_ seconds: Double) {
-        telemetryLock.lock()
-        defer { telemetryLock.unlock() }
-        _lastWallReanchorSeconds = seconds
-        _totalWallReanchorSeconds += seconds
-        _wallReanchorCount += 1
+        AudioTimelineTelemetryRegistry.shared.recordWallReanchor(track: id, seconds: seconds)
     }
 
     private func recordClockJump(_ seconds: Double) {
-        telemetryLock.lock()
-        defer { telemetryLock.unlock() }
-        _totalClockJumpSeconds += seconds
+        AudioTimelineTelemetryRegistry.shared.recordClockJump(track: id, seconds: seconds)
     }
 
     /// Re-anchors the output timeline onto wall-clock rate whenever it trails
@@ -232,9 +264,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
 
     @inline(__always)
     private func lastWallReanchorReset() {
-        telemetryLock.lock()
-        defer { telemetryLock.unlock() }
-        _lastWallReanchorSeconds = 0
+        AudioTimelineTelemetryRegistry.shared.clearLastWallReanchor(track: id)
     }
 
     init(id: UInt8, outputFormat: AVAudioFormat) {

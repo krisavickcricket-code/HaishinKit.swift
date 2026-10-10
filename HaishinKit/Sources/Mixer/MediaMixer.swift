@@ -320,9 +320,12 @@ public final actor MediaMixer {
     /// Read-only audio-timeline telemetry (wall re-anchors + capture-outage
     /// jumps) for field-log surfacing. The stamp timeline is the single A/V
     /// alignment authority downstream; any non-zero re-anchor total is a
-    /// proven desync event the capture clock never reported.
-    public func audioTimelineTelemetry(track: UInt8 = 0) -> AudioTimelineTelemetry? {
-        audioIO.audioTimelineTelemetry(track: track)
+    /// proven desync event the capture clock never reported. Deliberately
+    /// `nonisolated`: the beat logger reads this from a utility queue and
+    /// must not hop onto (or serialize behind) this actor; the values live in
+    /// a lock-backed registry (one mixer per process) the tracks write into.
+    public nonisolated func audioTimelineTelemetry(track: UInt8 = 0) -> AudioTimelineTelemetry? {
+        AudioTimelineTelemetryRegistry.shared.telemetry(track: track)
     }
 
     public func configuration(_ lambda: @Sendable (_ session: AVCaptureSession) throws -> Void) rethrows {

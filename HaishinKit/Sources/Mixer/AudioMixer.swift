@@ -27,9 +27,4 @@ protocol AudioMixer: AnyObject {
     func append(_ track: UInt8, buffer: CMSampleBuffer)
     func append(_ track: UInt8, buffer: AVAudioPCMBuffer, when: AVAudioTime)
 
-    /// Read-only audio-timeline telemetry for a track: wall re-anchors and
-    /// capture-outage jumps. The stamp timeline is the single A/V alignment
-    /// authority for recordings and streams; surfacing its corrections lets
-    /// field logs prove desyncs instead of guessing at them.
-    func audioTimelineTelemetry(track: UInt8) -> AudioTimelineTelemetry?
 }
