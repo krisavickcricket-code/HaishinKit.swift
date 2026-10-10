@@ -52,6 +52,13 @@ final class AudioMixerBySingleTrack: AudioMixer {
         inSourceFormat = buffer.format.formatDescription
         self.track?.append(buffer, when: when)
     }
+
+    func audioTimelineTelemetry(track: UInt8) -> AudioTimelineTelemetry? {
+        guard settings.mainTrack == track else {
+            return nil
+        }
+        return self.track?.audioTimelineTelemetry
+    }
 }
 
 extension AudioMixerBySingleTrack: AudioMixerTrackDelegate {

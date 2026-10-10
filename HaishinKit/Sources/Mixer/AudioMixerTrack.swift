@@ -3,6 +3,43 @@ import AVFoundation
 
 private let kIOAudioMixerTrack_frameCapacity: AVAudioFrameCount = 1024
 
+/// Timeline-vs-wall tolerance before a wall re-anchor is even considered.
+/// Ordinary capture->render latency and ring-buffer hold stay well below
+/// this at steady state; an un-owned outage (mic dead air the capture clock
+/// never reported — a phone call under DND-off, a mic route flap, silence
+/// delivered across an interruption) shows up as a lag that grows with the
+/// outage and never recovers on its own, because the capture PTS continue
+/// seamlessly from a clock that froze with the mic.
+private let kWallReanchorEpsilonSeconds: Double = 0.15
+
+/// A lag must persist this long in wall time before the re-anchor fires.
+/// A late-delivery burst (audio captured through a CPU stall, delivered
+/// late with content intact) also measures as lag while it drains — but
+/// the burst completes within milliseconds, so by the time the settle
+/// window elapses its own delivered samples have erased the lag and the
+/// guard fails. A real outage's lag never drains (the capture clock froze
+/// with the mic; there is nothing coming to fill the gap), so it survives
+/// the window and the repair fires about half a second after content
+/// resumes.
+private let kWallReanchorSettleSeconds: Double = 0.5
+
+/// Read-only facts about the audio output timeline's health. The output
+/// timeline is the single stamp authority for everything downstream —
+/// recordings (AVAssetWriter) and streams (RTMP) both stamp from it — so any
+/// displacement it accumulates shows up as audio out of sync with video in
+/// every surface at once.
+public struct AudioTimelineTelemetry: Sendable {
+    /// Signed seconds the timeline moved on the most recent wall re-anchor.
+    /// Positive = advanced to close a trailing lag, negative = pulled back.
+    public let lastWallReanchorSeconds: Double
+    /// Signed sum of every wall re-anchor since the track was born.
+    public let totalWallReanchorSeconds: Double
+    /// Number of wall re-anchors since the track was born.
+    public let wallReanchorCount: Int
+    /// Signed sum of the capture-outage jumps mirrored from the ring buffer.
+    public let totalClockJumpSeconds: Double
+}
+
 protocol AudioMixerTrackDelegate: AnyObject {
     func track(_ track: AudioMixerTrack<Self>, didOutput audioPCMBuffer: AVAudioPCMBuffer, when: AVAudioTime)
     func track(_ track: AudioMixerTrack<Self>, errorOccurred error: AudioMixerError)
@@ -106,6 +143,100 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
         }
     }
 
+    // MARK: - Wall re-anchor
+
+    private var wallLagFirstSeenMachSeconds: Double = 0
+
+    private let telemetryLock = NSLock()
+    private var _lastWallReanchorSeconds: Double = 0
+    private var _totalWallReanchorSeconds: Double = 0
+    private var _wallReanchorCount = 0
+    private var _totalClockJumpSeconds: Double = 0
+
+    /// Current audio-timeline telemetry. Safe to read from any queue; the
+    /// append path runs on the capture callback queue.
+    var audioTimelineTelemetry: AudioTimelineTelemetry {
+        telemetryLock.lock()
+        defer { telemetryLock.unlock() }
+        return AudioTimelineTelemetry(
+            lastWallReanchorSeconds: _lastWallReanchorSeconds,
+            totalWallReanchorSeconds: _totalWallReanchorSeconds,
+            wallReanchorCount: _wallReanchorCount,
+            totalClockJumpSeconds: _totalClockJumpSeconds
+        )
+    }
+
+    private func recordWallReanchor(_ seconds: Double) {
+        telemetryLock.lock()
+        defer { telemetryLock.unlock() }
+        _lastWallReanchorSeconds = seconds
+        _totalWallReanchorSeconds += seconds
+        _wallReanchorCount += 1
+    }
+
+    private func recordClockJump(_ seconds: Double) {
+        telemetryLock.lock()
+        defer { telemetryLock.unlock() }
+        _totalClockJumpSeconds += seconds
+    }
+
+    /// Re-anchors the output timeline onto wall-clock rate whenever it trails
+    /// (or leads) wall time by more than the tolerance and the ring does not
+    /// already own the gap. This is the catch-all for outages the capture
+    /// clock never reports: the capture PTS keep advancing seamlessly on a
+    /// clock that froze with the mic, so neither the ring's PTS-gap logic nor
+    /// the delivery-lateness jump can see the gap — only the wall can. The
+    /// correction moves the timeline forward inside its own anchor domain
+    /// (stamps jump forward as a gap; downstream writers keep the hole rather
+    /// than shifting audio early), leaving audio after the outage at its true
+    /// wall-clock position relative to video.
+    private func applyWallReanchor() {
+        lastWallReanchorReset()
+        guard audioTime.hasAnchor, let ringBuffer else {
+            return
+        }
+        let wallNow = AudioTime.machWallSeconds()
+        guard let lag = audioTime.wallRateLagSeconds(nowMachSeconds: wallNow) else {
+            return
+        }
+        // Timeline seconds the ring still owes or holds — silence-fill debt
+        // plus buffered input. A lag the ring will fill (captured content en
+        // route, a PTS-reported gap awaiting starvation) is owned and must
+        // never trigger a correction.
+        let owed = ringBuffer.owedSeconds
+        let effectiveLag = lag - owed
+        if kWallReanchorEpsilonSeconds < effectiveLag {
+            if wallLagFirstSeenMachSeconds == 0 {
+                wallLagFirstSeenMachSeconds = wallNow
+            }
+            guard kWallReanchorSettleSeconds <= wallNow - wallLagFirstSeenMachSeconds else {
+                return
+            }
+            wallLagFirstSeenMachSeconds = 0
+            let correction = effectiveLag
+            audioTime.advanced(seconds: correction)
+            recordWallReanchor(correction)
+        } else {
+            wallLagFirstSeenMachSeconds = 0
+            guard effectiveLag < -kWallReanchorEpsilonSeconds else {
+                return
+            }
+            // The timeline ran into the future (a misfired jump). Pull it back
+            // to wall: the few stamps ahead of reality get bounded and loudly
+            // counted, which beats leaving audio permanently early.
+            let correction = effectiveLag
+            audioTime.advanced(seconds: correction)
+            recordWallReanchor(correction)
+        }
+    }
+
+    @inline(__always)
+    private func lastWallReanchorReset() {
+        telemetryLock.lock()
+        defer { telemetryLock.unlock() }
+        _lastWallReanchorSeconds = 0
+    }
+
     init(id: UInt8, outputFormat: AVAudioFormat) {
         self.id = id
         self.outputFormat = outputFormat
@@ -118,6 +249,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
         }
         ringBuffer?.append(sampleBuffer)
         applyOutageClockJump()
+        applyWallReanchor()
         resample()
     }
 
@@ -128,6 +260,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
         }
         ringBuffer?.append(audioBuffer, when: when)
         applyOutageClockJump()
+        applyWallReanchor()
         resample()
     }
 
@@ -143,6 +276,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
             return
         }
         audioTime.advanced(seconds: ringBuffer.lastClockJumpSeconds)
+        recordClockJump(ringBuffer.lastClockJumpSeconds)
     }
 
     @inline(__always)
@@ -190,6 +324,7 @@ final class AudioMixerTrack<T: AudioMixerTrackDelegate> {
             logger.info("inputFormat:", inputFormat, ", outputFormat:", outputFormat)
         }
         audioTime.reset()
+        wallLagFirstSeenMachSeconds = 0
         audioConverter = .init(from: inputFormat, to: outputFormat)
     }
 }

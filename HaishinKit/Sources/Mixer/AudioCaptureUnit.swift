@@ -108,6 +108,10 @@ final class AudioCaptureUnit: CaptureUnit {
         }
     }
 
+    func audioTimelineTelemetry(track: UInt8) -> AudioTimelineTelemetry? {
+        audioMixer.audioTimelineTelemetry(track: track)
+    }
+
     func finish() {
         continutation?.finish()
     }
