@@ -79,6 +79,86 @@ extension AVAudioPCMBuffer {
         return buffer
     }
 
+    /// CN-VOL-1: multiplies every sample by `value` in place, clamped at full
+    /// scale (no Int16 wrap like the Android version guards against). Unity 
+    /// (1.0) or non-finite values are fast no-op returns so golden sessions
+    /// stay byte-identical. Chain order at the mixer site is gain THEN mute,
+    /// so mute always wins (scaled silence is still silence).
+    @discardableResult
+    @inlinable
+    final func gain(_ value: Float) -> AVAudioPCMBuffer {
+        guard value != 1.0, value.isFinite else {
+            return self
+        }
+        @inline(__always) func scaleInt16(_ sample: Int16) -> Int16 {
+            let scaled = Double(sample) * Double(value)
+            if scaled >= 32767.0 { return Int16.max }
+            if scaled <= -32768.0 { return Int16.min }
+            return Int16(scaled.rounded(.toNearestOrAwayFromZero))
+        }
+        @inline(__always) func scaleInt32(_ sample: Int32) -> Int32 {
+            let scaled = Double(sample) * Double(value)
+            if scaled >= Double(Int32.max) { return Int32.max }
+            if scaled <= Double(Int32.min) { return Int32.min }
+            return Int32(scaled.rounded(.toNearestOrAwayFromZero))
+        }
+        @inline(__always) func scaleFloat32(_ sample: Float) -> Float {
+            max(-1.0, min(1.0, sample * value))
+        }
+        let numSamples = Int(frameLength)
+        if format.isInterleaved {
+            let channelCount = Int(format.channelCount)
+            switch format.commonFormat {
+            case .pcmFormatInt16:
+                int16ChannelData?[0].withMemoryRebound(to: Int16.self, capacity: numSamples * channelCount) { samples in
+                    for i in 0..<numSamples * channelCount {
+                        samples[i] = scaleInt16(samples[i])
+                    }
+                }
+            case .pcmFormatInt32:
+                int32ChannelData?[0].withMemoryRebound(to: Int32.self, capacity: numSamples * channelCount) { samples in
+                    for i in 0..<numSamples * channelCount {
+                        samples[i] = scaleInt32(samples[i])
+                    }
+                }
+            case .pcmFormatFloat32:
+                if let data = floatChannelData?[0] {
+                    for i in 0..<numSamples * channelCount {
+                        data[i] = scaleFloat32(data[i])
+                    }
+                }
+            default:
+                break
+            }
+        } else {
+            for ch in 0..<Int(format.channelCount) {
+                switch format.commonFormat {
+                case .pcmFormatInt16:
+                    int16ChannelData?[ch].withMemoryRebound(to: Int16.self, capacity: numSamples) { samples in
+                        for i in 0..<numSamples {
+                            samples[i] = scaleInt16(samples[i])
+                        }
+                    }
+                case .pcmFormatInt32:
+                    int32ChannelData?[ch].withMemoryRebound(to: Int32.self, capacity: numSamples) { samples in
+                        for i in 0..<numSamples {
+                            samples[i] = scaleInt32(samples[i])
+                        }
+                    }
+                case .pcmFormatFloat32:
+                    if let data = floatChannelData?[ch] {
+                        for i in 0..<numSamples {
+                            data[i] = scaleFloat32(data[i])
+                        }
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        return self
+    }
+
     @discardableResult
     @inlinable
     final func muted(_ isMuted: Bool) -> AVAudioPCMBuffer {

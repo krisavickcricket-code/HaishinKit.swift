@@ -24,6 +24,13 @@ public struct AudioMixerSettings: Sendable {
     /// Specifies the muted that indicates whether the audio output is muted.
     public var isMuted: Bool
 
+    /// CN-VOL-1: linear output gain applied to every mixed output buffer
+    /// (1.0 = unity/no change). Applied at the mixer's delegate site AFTER the
+    /// tracks are mixed and BEFORE mute, so every consumer — RTMP stream and
+    /// local recordings — sees the same gain from one point. Values above 1.0
+    /// clip at full scale in AVAudioPCMBuffer.gain(_:).
+    public var volume: Float
+
     /// Specifies the main track number.
     public var mainTrack: UInt8
 
@@ -39,12 +46,14 @@ public struct AudioMixerSettings: Sendable {
         sampleRate: Float64 = 0,
         channels: UInt32 = 0,
         isMuted: Bool = false,
+        volume: Float = 1.0,
         mainTrack: UInt8 = 0,
         tracks: [UInt8: AudioMixerTrackSettings] = .init()
     ) {
         self.sampleRate = sampleRate
         self.channels = channels
         self.isMuted = isMuted
+        self.volume = volume
         self.mainTrack = mainTrack
         self.tracks = tracks
     }

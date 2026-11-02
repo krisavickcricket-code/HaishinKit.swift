@@ -58,7 +58,9 @@ extension AudioMixerBySingleTrack: AudioMixerTrackDelegate {
     // MARK: AudioMixerTrackDelegate
     func track(_ track: AudioMixerTrack<AudioMixerBySingleTrack>, didOutput buffer: AVAudioPCMBuffer, when: AVAudioTime) {
         delegate?.audioMixer(self, track: track.id, didInput: buffer, when: when)
-        delegate?.audioMixer(self, didOutput: buffer.muted(settings.isMuted), when: when)
+        // CN-VOL-1: gain rides into every output (RTMP + recorder share this
+        // buffer); mute wins by chaining last. Unity gain is a fast no-op.
+        delegate?.audioMixer(self, didOutput: buffer.gain(settings.volume).muted(settings.isMuted), when: when)
     }
 
     func track(_ rtrack: AudioMixerTrack<AudioMixerBySingleTrack>, errorOccurred error: AudioMixerError) {
